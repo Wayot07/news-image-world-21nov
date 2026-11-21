@@ -4,27 +4,82 @@
 // The program copies it to /output/entry.png. The copy is byte-for-byte,
 // so both grader runs write identical bytes. No network, no randomness,
 // no timestamps: the output depends only on the entry.png shipped here.
-// The image was drawn programmatically (Python PIL) in this same session:
+// The image was drawn programmatically (Python PIL) in the build session:
 // hero story (Russian missiles strike Poland; NATO calls it a grave
 // violation), eight vignettes, an ALSO strip and a news wire ticker,
 // all dated 21 Nov 2026.
+// Fix pass: the source is validated as a real PNG before copying, and the
+// copy is verified afterwards (identical byte size + valid PNG signature),
+// so a truncated or corrupted copy fails loudly instead of passing
+// silently as a valid-looking entry.
 // Outside the grader's container,
 // MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
-import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
+import {
+  closeSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  statSync,
+} from 'node:fs';
 import { join } from 'node:path';
+
+// PNG files start with this exact 8-byte signature (RFC 2083, section 5.2).
+const PNG_SIGNATURE = Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+]);
+
+function fail(message: string): never {
+  console.error(`error: ${message}`);
+  process.exit(1);
+}
+
+function readSignature(path: string): Buffer {
+  const fd = openSync(path, 'r');
+  try {
+    const buf = Buffer.alloc(PNG_SIGNATURE.length);
+    const bytesRead = readSync(fd, buf, 0, PNG_SIGNATURE.length, 0);
+    if (bytesRead !== PNG_SIGNATURE.length) {
+      fail(`${path} is too short to be a PNG (${bytesRead} bytes)`);
+    }
+    return buf;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function requirePng(path: string, label: string): void {
+  if (!readSignature(path).equals(PNG_SIGNATURE)) {
+    fail(`${label} is not a PNG file (bad 8-byte signature): ${path}`);
+  }
+}
 
 const src = new URL('./entry.png', import.meta.url);
 if (!existsSync(src)) {
-  console.error(`error: entry.png is missing: ${src.pathname}`);
-  process.exit(1);
+  fail(`entry.png is missing: ${src.pathname}`);
 }
-if (statSync(src).size === 0) {
-  console.error('error: entry.png is empty (0 bytes)');
-  process.exit(1);
+const srcSize = statSync(src).size;
+if (srcSize === 0) {
+  fail('entry.png is empty (0 bytes)');
 }
+requirePng(src.pathname, 'entry.png');
 
 const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 mkdirSync(outDir, { recursive: true });
-copyFileSync(src, join(outDir, 'entry.png'));
+const dest = join(outDir, 'entry.png');
+copyFileSync(src, dest);
+
+// Verify the copy: identical byte size and a valid PNG signature,
+// so a partial write can never masquerade as a finished entry.
+// A short file is the classic symptom of a partial write; the signature
+// check catches a copy that is the right size but the wrong content.
+const destSize = statSync(dest).size;
+if (destSize !== srcSize) {
+  fail(`copied entry.png is ${destSize} bytes, expected ${srcSize} bytes`);
+}
+requirePng(dest, 'copied entry.png');
+
+console.log(`wrote ${dest} (${destSize} of ${srcSize} source bytes, PNG signature OK)`);
